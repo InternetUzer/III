@@ -41,7 +41,7 @@ dp = Dispatcher()
 bot = Bot(token=TELEGRAM_BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 
 # --- DB (SQLite) ---
-DB_PATH = "history.db"
+DB_PATH = "data/history.db"
 os.makedirs("data", exist_ok=True)
 
 def db_connect():
