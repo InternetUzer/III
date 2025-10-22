@@ -8,13 +8,15 @@ from typing import List, Tuple
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, FSInputFile
+from aiogram.types import Message
 from aiogram.enums import ChatAction
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 import ffmpeg
 
+import httpx
 from openai import OpenAI
+import openai as openai_pkg  # только чтобы залогировать версию SDK
 
 load_dotenv()
 
@@ -33,16 +35,23 @@ if not TELEGRAM_BOT_TOKEN:
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY не задан.")
 
-# --- OpenAI ---
-client = OpenAI(api_key=OPENAI_API_KEY)
+# --- Logging ---
+logging.basicConfig(level=logging.INFO)
+logging.info(f"OpenAI SDK version: {getattr(openai_pkg, '__version__', 'unknown')}")
+
+# --- OpenAI (без прокси) ---
+# Явно создаём httpx-клиент без прокси, чтобы избежать ошибки 'unexpected keyword argument: proxies'
+_httpx_client = httpx.Client(proxies=None, timeout=60)
+client = OpenAI(api_key=OPENAI_API_KEY, http_client=_httpx_client)
 
 # --- Telegram ---
 dp = Dispatcher()
 bot = Bot(token=TELEGRAM_BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 
 # --- DB (SQLite) ---
-DB_PATH = "data/history.db"
+# Пишем в папку data/, которую можно смонтировать как Volume на Railway
 os.makedirs("data", exist_ok=True)
+DB_PATH = "data/history.db"
 
 def db_connect():
     return sqlite3.connect(DB_PATH)
@@ -78,7 +87,6 @@ def get_use_context(user_id: int) -> bool:
         cur = conn.execute("SELECT use_context FROM user_settings WHERE user_id=?", (user_id,))
         row = cur.fetchone()
         if row is None:
-            # default
             return USE_CONTEXT_DEFAULT
         return bool(row[0])
 
@@ -144,7 +152,6 @@ async def transcribe_file(path: str) -> str:
                 model=STT_MODEL,
                 file=f,
             )
-        # у SDK 1.x возвращается объект с текстом в поле 'text'
         text = getattr(tr, "text", None)
         if isinstance(text, str) and text.strip():
             return text.strip()
@@ -197,7 +204,7 @@ async def reply_long(message: Message, text: str):
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     text = (
-        "Привет! Я бот для общения с моим ИИ‑помощником.\n\n"
+        "Привет! Я бот для общения с моим ИИ-помощником.\n\n"
         "Отправьте текст или голосовое — я отвечу.\n\n"
         "Команды:\n"
         "/reset — очистить историю диалога\n"
@@ -226,11 +233,9 @@ async def handle_text(message: Message):
 
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
 
-    # контекст
     msgs = build_message_stack(user_id, user_text)
     reply = await openai_answer(msgs)
 
-    # сохранить историю
     add_message(user_id, "user", user_text)
     add_message(user_id, "assistant", reply)
 
@@ -260,18 +265,18 @@ async def handle_voice(message: Message):
     dst_path = f"data/{file.file_unique_id}.mp3"
     await bot.download_file(file.file_path, src_path)
 
-    # попытка конвертации в mp3 (иногда whisper принимает и ogg, но стабильнее mp3)
+    # конвертация в mp3 (иногда whisper принимает и ogg, но стабильнее mp3)
     try:
         convert_ogg_to_mp3(src_path, dst_path)
         audio_path = dst_path
     except Exception:
         audio_path = src_path  # fallback
 
-    # распознаем
+    # распознание
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
     recognized = await transcribe_file(audio_path)
 
-    # отвечаем как на текст + сохраняем историю
+    # ответ как на текст + сохранение истории
     msgs = build_message_stack(user_id, recognized)
     reply = await openai_answer(msgs)
 
@@ -281,7 +286,6 @@ async def handle_voice(message: Message):
     await reply_long(message, f"🗣️ Распознано: <i>{recognized}</i>\n\n{reply}")
 
 async def main():
-    logging.basicConfig(level=logging.INFO)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
